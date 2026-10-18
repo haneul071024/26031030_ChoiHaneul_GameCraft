@@ -16,4 +16,13 @@
     <PackageReference Include="Vortice.XInput" Version="3.8.3" />
   </ItemGroup>
 
+  <!-- 나중에 추가할 이미지와 사운드도 실행 파일 옆 resource 폴더에 복사한다. -->
+  <ItemGroup>
+    <Content Include="..\..\resource\**\*" Exclude="..\..\resource\**\*.md">
+      <Link>resource\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
