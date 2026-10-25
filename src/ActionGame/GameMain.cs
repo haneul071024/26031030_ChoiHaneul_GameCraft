@@ -27,24 +27,61 @@ namespace ActionGame
         private float kickX;
         private float kickY;
         private const float KickRadius = 38;
+        private GameAssets? assets;
+        private GameHud? hud;
+        private float kickAngle;
+        private readonly List<GameEffect> effects = new();
+        private float playerWalkTime;
+        private float enemyWalkTime;
+        private bool playerMoving;
+
+        private void AddEffect(string sheet, float x, float y, float size, float duration, float angle = 0)
+        {
+            if (effects.Count >= 64) effects.RemoveAt(0);
+            effects.Add(new GameEffect(sheet, x, y, size, duration, angle));
+        }
+
+        private void UpdateEffects(float dt)
+        {
+            foreach (GameEffect effect in effects) effect.Update(dt);
+            effects.RemoveAll(effect => effect.Finished);
+        }
+
+        private void RemoveDefeatedEnemies()
+        {
+            for (int i = enemies.Count - 1; i >= 0; i--)
+            {
+                if (enemies[i].Hp > 0) continue;
+                AddEffect("enemy_break_sheet", enemies[i].X, enemies[i].Y, 88, 0.4f);
+                assets?.QueueSound("enemy_break");
+                enemies.RemoveAt(i);
+                score += 100;
+            }
+        }
 
         protected override void Initialize()
         {
             // Run이 시작될 때 한 번 호출된다. 이때는 그래픽 장치가 준비되어 있다.
-            ClearColor = Rgb(24, 28, 36);
+            ClearColor = Rgb(17, 22, 18);
             brush = RenderTarget.CreateSolidColorBrush(Rgb(255, 255, 255));
             uiFont = new G2Font("맑은 고딕", 17, FontWeight.Normal);
             titleFont = new G2Font("맑은 고딕", 32, FontWeight.Bold);
+            assets = new GameAssets();
+            hud = new GameHud();
             StartGame();
         }
 
         private void StartGame()
         {
+            assets?.StopSounds();
             player = new Player();
             enemies.Clear();
             score = 0;
             gameEnded = false;
             kickEffectTime = 0;
+            effects.Clear();
+            playerWalkTime = enemyWalkTime = 0;
+            playerMoving = false;
 
             // 일단 적 6마리를 고정 위치에 배치한다. 생성자를 통해 좌표를 전달한다.
             enemies.Add(new Enemy(150, 180));
@@ -61,39 +98,42 @@ namespace ActionGame
             // 창이 비활성 상태라면 게임을 잠시 멈추고 눌림 기록을 지운다.
             if (Form.ActiveForm == null)
             {
+                assets?.StopSounds();
                 Input.Reset();
                 return;
             }
+            float dt = Math.Min((float)DeltaTime, 0.05f);
+            UpdateEffects(dt); // 결과창 뒤에서도 마지막 파괴 효과가 끝까지 재생된다.
             if (gameEnded)
             {
                 // Alt+Enter는 glc2d의 전체 화면 키이므로 재시작과 구분한다.
-                if (Input.IsKeyDown(Keys.Enter) && !IsHeld(Keys.Menu)) StartGame();
+                if (Input.IsKeyDown(Keys.Enter) && !IsHeld(Keys.Menu))
+                {
+                    StartGame();
+                    assets?.QueueSound("restart");
+                    assets?.FlushSounds(TotalTime);
+                }
                 return;
             }
             // 실제로 지난 시간을 이용하면 컴퓨터 속도에 따른 이동 차이가 줄어든다.
             // 창을 오래 멈췄다가 돌아와도 갑자기 멀리 이동하지 않도록 최대값을 둔다.
-            float dt = Math.Min((float)DeltaTime, 0.05f);
+
             if (!gameEnded)
             {
                 player.KickCooldown = Math.Max(0, player.KickCooldown - dt);
                 player.InvincibleTime = Math.Max(0, player.InvincibleTime - dt);
                 kickEffectTime = Math.Max(0, kickEffectTime - dt);
+                enemyWalkTime += dt;
                 MovePlayer(dt);
                 // IsKeyDown은 처음 누른 프레임만 true라서 꾹 눌러도 연타되지 않는다.
                 if (Input.IsKeyDown(Keys.J)) Kick();
                 MoveEnemies(dt);
                 CheckEnemyCollisions();
 
-                // 반복문 안에서 적을 지우면 목록 순서가 바뀌므로 나중에 모아서 지운다.
-                for (int i = enemies.Count - 1; i >= 0; i--)
-                {
-                    if (enemies[i].Hp <= 0)
-                    {
-                        enemies.RemoveAt(i);
-                        score += 100;
-                    }
-                }
+                RemoveDefeatedEnemies();
                 gameEnded = player.Hp <= 0 || enemies.Count == 0;
+                if (gameEnded) assets?.QueueSound(player.Hp <= 0 ? "game_over" : "clear");
+                assets?.FlushSounds(TotalTime);
             }
             // Invalidate나 Timer는 필요 없다. glc2d가 이어서 Render를 호출한다.
         }
@@ -107,6 +147,8 @@ namespace ActionGame
 
         private void MovePlayer(float dt)
         {
+            float previousX = player.X;
+            float previousY = player.Y;
             float dx = 0;
             float dy = 0;
             if (IsHeld(Keys.W)) dy -= 1;
@@ -127,6 +169,8 @@ namespace ActionGame
             }
             player.X = Math.Clamp(player.X, arena.Left + player.Radius, arena.Right - player.Radius);
             player.Y = Math.Clamp(player.Y, arena.Top + player.Radius, arena.Bottom - player.Radius);
+            playerMoving = Distance(previousX, previousY, player.X, player.Y) > 0.001f;
+            playerWalkTime = playerMoving ? playerWalkTime + dt : 0;
         }
 
         private void Kick()
@@ -134,6 +178,8 @@ namespace ActionGame
             if (player.KickCooldown > 0) return;
             player.KickCooldown = 0.4f;
             kickEffectTime = 0.12f;
+            kickAngle = MathF.Atan2(player.DirectionY, player.DirectionX);
+            assets?.QueueSound("kick_swing");
             kickX = player.X + player.DirectionX * 42;
             kickY = player.Y + player.DirectionY * 42;
 
@@ -143,6 +189,8 @@ namespace ActionGame
                 // 플레이어 앞쪽의 원에 닿은 적에게만 킥이 맞는다.
                 if (Distance(kickX, kickY, enemy.X, enemy.Y) < KickRadius + enemy.Radius)
                 {
+                    AddEffect("hit_spark_sheet", enemy.X, enemy.Y, 66, 0.20f);
+                    assets?.QueueSound("metal_hit");
                     enemy.Hp -= 1;
                     LaunchEnemy(enemy, player.DirectionX, player.DirectionY);
                 }
@@ -174,6 +222,15 @@ namespace ActionGame
                     if (enemy.X < arena.Left + enemy.Radius || enemy.X > arena.Right - enemy.Radius ||
                         enemy.Y < arena.Top + enemy.Radius || enemy.Y > arena.Bottom - enemy.Radius)
                     {
+                        float wallX = Math.Clamp(enemy.X, arena.Left, arena.Right);
+                        float wallY = Math.Clamp(enemy.Y, arena.Top, arena.Bottom);
+                        float wallAngle;
+                        if (enemy.X < arena.Left + enemy.Radius) { wallX = arena.Left; wallAngle = MathF.PI; }
+                        else if (enemy.X > arena.Right - enemy.Radius) { wallX = arena.Right; wallAngle = 0; }
+                        else if (enemy.Y < arena.Top + enemy.Radius) { wallY = arena.Top; wallAngle = -MathF.PI / 2; }
+                        else { wallY = arena.Bottom; wallAngle = MathF.PI / 2; }
+                        AddEffect("wall_hit_sheet", wallX, wallY, 80, 0.28f, wallAngle);
+                        assets?.QueueSound("wall_hit");
                         enemy.Hp -= 1; // 벽에 날려 맞히면 추가 피해!
                         enemy.FlyTime = 0;
                     }
@@ -191,6 +248,8 @@ namespace ActionGame
                     if (Distance(player.X, player.Y, enemy.X, enemy.Y) < player.Radius + enemy.Radius &&
                         player.InvincibleTime <= 0 && player.Hp > 0)
                     {
+                        AddEffect("hit_spark_sheet", player.X, player.Y, 52, 0.20f);
+                        assets?.QueueSound("player_hurt");
                         player.Hp -= 1;
                         player.InvincibleTime = 1; // 1초 동안 추가 피격을 막는다.
                     }
@@ -211,6 +270,8 @@ namespace ActionGame
                     if (Distance(flying.X, flying.Y, target.X, target.Y) < flying.Radius + target.Radius)
                     {
                         flying.HitEnemies.Add(target);
+                        AddEffect("hit_spark_sheet", target.X, target.Y, 66, 0.20f);
+                    assets?.QueueSound("metal_hit");
                         target.Hp -= 1;
                         // 맞은 적도 같은 방향으로 날아가서 연쇄 충돌을 만들 수 있다.
                         float speed = MathF.Sqrt(flying.VelocityX * flying.VelocityX + flying.VelocityY * flying.VelocityY);
@@ -239,40 +300,43 @@ namespace ActionGame
             // RenderTarget은 glc2d가 제공하는 Direct2D 그리기 대상이다.
             if (brush == null || uiFont == null || titleFont == null) return;
 
-            FillBox(arena.X, arena.Y, arena.Width, arena.Height, Rgb(47, 79, 79));
-            brush.Color = Rgb(119, 136, 153);
+            assets?.DrawFloor(new Rect(arena.X, arena.Y, arena.Width, arena.Height));
+            brush.Color = Rgb(112, 119, 99);
             RenderTarget.DrawRectangle(new Rect(arena.X, arena.Y, arena.Width, arena.Height), brush);
-            DrawLabel($"고철 킥!    체력: {player.Hp} / 5    점수: {score}    남은 적: {enemies.Count}", 30, 18);
-            DrawLabel("WASD: 이동  |  J: 킥  |  적을 벽이나 다른 적에게 날려 보세요!", 30, 50);
+            if (assets != null) hud?.DrawStatus(assets, player, score, enemies.Count);
 
             foreach (Enemy enemy in enemies)
             {
-                Color4 color = enemy.FlyTime > 0 ? Rgb(255, 165, 0) : Rgb(205, 92, 92);
-                FillCircle(enemy.X, enemy.Y, enemy.Radius, color);
-                DrawLabel(enemy.Hp.ToString(), enemy.X - 6, enemy.Y - 12);
+                bool flying = enemy.FlyTime > 0;
+                float angle = flying
+                    ? MathF.Atan2(enemy.VelocityY, enemy.VelocityX)
+                    : MathF.Atan2(player.Y - enemy.Y, player.X - enemy.X);
+                if (flying) assets?.DrawSprite("enemy_flying", enemy.X, enemy.Y, 48, angle);
+                else if (!gameEnded && Distance(player.X, player.Y, enemy.X, enemy.Y) > 1)
+                    assets?.DrawFrame("enemy_walk_sheet", (int)(enemyWalkTime * 7) % 4, enemy.X, enemy.Y, 48, angle);
+                else assets?.DrawSprite("enemy_basic", enemy.X, enemy.Y, 48, angle);
+                hud?.DrawEnemyHealth(enemy.X, enemy.Y, enemy.Hp, flying);
             }
 
-            Color4 playerColor = player.InvincibleTime > 0 ? Rgb(224, 255, 255) : Rgb(0, 191, 255);
-            FillCircle(player.X, player.Y, player.Radius, playerColor);
+            float playerAngle = kickEffectTime > 0 ? kickAngle : MathF.Atan2(player.DirectionY, player.DirectionX);
+            float opacity = player.InvincibleTime > 0 && (int)(player.InvincibleTime * 12) % 2 == 0 ? 0.35f : 1;
+            if (kickEffectTime > 0)
+                assets?.DrawSprite("player_kick", player.X, player.Y, 50, playerAngle, opacity);
+            else if (playerMoving && !gameEnded)
+                assets?.DrawFrame("player_walk_sheet", (int)(playerWalkTime * 9) % 4, player.X, player.Y, 50, playerAngle, opacity);
+            else assets?.DrawSprite("player_idle", player.X, player.Y, 50, playerAngle, opacity);
             brush.Color = Rgb(255, 255, 255);
             RenderTarget.DrawLine(new Vector2(player.X, player.Y),
-                new Vector2(player.X + player.DirectionX * 28, player.Y + player.DirectionY * 28), brush, 2);
+                new Vector2(player.X + MathF.Cos(playerAngle) * 28, player.Y + MathF.Sin(playerAngle) * 28), brush, 2);
             if (kickEffectTime > 0)
-            {
-                brush.Color = Rgb(255, 255, 0);
-                RenderTarget.DrawEllipse(new Ellipse(new Vector2(kickX, kickY), KickRadius, KickRadius), brush, 2);
-            }
+                assets?.DrawSprite("kick_arc", kickX, kickY, 96, kickAngle, 0.9f);
 
-            DrawLabel("빨강: 적 / 주황: 날아가는 적 / 흰 선: 공격 방향 / Alt+Enter: 전체 화면", 30, 585);
-            if (gameEnded)
-            {
-                FillBox(190, 230, 520, 150, Rgb(0, 0, 0));
-                string result = player.Hp <= 0 ? "게임 오버" : "클리어!";
-                titleFont.DrawText(result, new Rect(340, 250, 300, 50), Rgb(255, 255, 255));
-                DrawLabel($"최종 점수: {score}    Enter: 다시 시작", 260, 320);
-            }
+            foreach (GameEffect effect in effects)
+                assets?.DrawFrame(effect.Sheet, effect.Frame, effect.X, effect.Y, effect.Size, effect.Angle);
+
+            if (gameEnded && assets != null)
+                hud?.DrawResult(assets, player.Hp <= 0, score, player.Hp);
         }
-
         // 아래 함수들은 자주 쓰는 그리기 코드를 짧게 묶은 것이다.
         // Rect의 인수는 왼쪽, 위쪽, 가로 길이, 세로 길이이다.
         private void FillBox(float x, float y, float width, float height, Color4 color)
@@ -306,6 +370,10 @@ namespace ActionGame
         {
             // 우리가 만든 자원을 먼저 정리하고, 마지막에 glc2d 장치를 정리한다.
             // 장치부터 없애면 그 장치를 쓰는 글꼴과 붓이 남을 수 있다.
+            hud?.Dispose();
+            hud = null;
+            assets?.Dispose();
+            assets = null;
             uiFont?.Dispose();
             titleFont?.Dispose();
             brush?.Dispose();
