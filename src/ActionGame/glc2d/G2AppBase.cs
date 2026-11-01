@@ -1,4 +1,4 @@
-﻿// -------------------------------------------------------------------------------------------------------------------------------------------------------------
+// -------------------------------------------------------------------------------------------------------------------------------------------------------------
 // Author: 3dapi (https://github.com/3dapi)
 // -------------------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -25,8 +25,22 @@ abstract class G2AppBase : IDisposable
 	public double DeltaTime { get; private set; }
 	public double TotalTime { get; private set; }
 
-	public float ScaleX => (float)_mainForm.ClientSize.Width / ScreenSize.Width;
-	public float ScaleY => (float)_mainForm.ClientSize.Height / ScreenSize.Height;
+	// 가로와 세로를 따로 늘리면 캐릭터와 글자가 찌그러진다.
+	// 더 작은 배율 하나를 두 방향에 똑같이 적용하고 남는 공간은 양쪽에 나눈다.
+	public System.Drawing.RectangleF Viewport => CalculateViewport(_mainForm.ClientSize, ScreenSize);
+	public float ScaleX => Viewport.Width / ScreenSize.Width;
+	public float ScaleY => ScaleX;
+
+	internal static System.Drawing.RectangleF CalculateViewport(System.Drawing.Size client, System.Drawing.Size game)
+	{
+		// 최소화된 창도 0으로 나누지 않도록 계산용 크기는 최소 1로 둔다.
+		float scale = Math.Min((float)Math.Max(1, client.Width) / game.Width,
+			(float)Math.Max(1, client.Height) / game.Height);
+		float width = game.Width * scale;
+		float height = game.Height * scale;
+		return new System.Drawing.RectangleF((client.Width - width) / 2,
+			(client.Height - height) / 2, width, height);
+	}
 
 	public static float ScreenScaleX => Instance?.ScaleX ?? throw new InvalidOperationException("ScreenScaleX::G2AppBase instance is not initialized.");
 	public static float ScreenScaleY => Instance?.ScaleY ?? throw new InvalidOperationException("ScreenScaleY::G2AppBase instance is not initialized.");
@@ -148,12 +162,20 @@ abstract class G2AppBase : IDisposable
 
 	private void Render2D()
 	{
+		if (_mainForm.ClientSize.Width <= 0 || _mainForm.ClientSize.Height <= 0) return;
 		ID2D1HwndRenderTarget renderTarget = _graphics.RenderTarget;
-		renderTarget.Transform = System.Numerics.Matrix3x2.CreateScale(ScreenScaleX, ScreenScaleY);
+		System.Drawing.RectangleF viewport = Viewport;
+		float scale = viewport.Width / ScreenSize.Width;
+		// 먼저 같은 비율로 확대하고, 여백만큼 이동시켜 화면 가운데에 놓는다.
+		renderTarget.Transform = System.Numerics.Matrix3x2.CreateScale(scale) *
+			System.Numerics.Matrix3x2.CreateTranslation(viewport.X, viewport.Y);
 		renderTarget.BeginDraw();
 		renderTarget.Clear(ClearColor);
 
-		Render();
+		// 불꽃이나 큰 이미지도 게임 영역 밖의 여백에는 그려지지 않게 자른다.
+		renderTarget.PushAxisAlignedClip(new Rect(0, 0, ScreenSize.Width, ScreenSize.Height), AntialiasMode.Aliased);
+		try { Render(); }
+		finally { renderTarget.PopAxisAlignedClip(); }
 
 		renderTarget.EndDraw();
 	}

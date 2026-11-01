@@ -4,6 +4,6 @@ namespace ActionGame
     internal static class GameGlobal
     {
         public static readonly Size ScreenSize = new Size(900, 620);
-        public static readonly string GameName = "고철 킥! - glc2d 기초 버전";
+        public static readonly string GameName = "고철 킥! - 폐기장 정리 작전";
     }
 }

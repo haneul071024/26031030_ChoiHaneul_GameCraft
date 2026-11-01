@@ -6,10 +6,12 @@ namespace ActionGame
     // 텍스처·효과음을 한 번 로딩하고 종료할 때 함께 해제한다.
     internal sealed class GameAssets : IDisposable
     {
+        // Dictionary는 이름으로 자원을 찾는 표이다. 매 프레임 파일을 다시 읽지 않는다.
         private readonly Dictionary<string, G2Texture> images = new();
         private readonly Dictionary<string, G2Audio> sounds = new();
         private readonly HashSet<string> pendingSounds = new();
         private readonly Dictionary<string, double> lastPlayed = new();
+        private G2Audio? music;
         public bool SoundEnabled => sounds.Count > 0;
 
         public GameAssets()
@@ -20,7 +22,7 @@ namespace ActionGame
                 foreach (string path in new[] {
                     "player/player_idle", "player/player_kick", "player/player_walk_sheet",
                     "enemy/enemy_basic", "enemy/enemy_flying", "enemy/enemy_walk_sheet",
-                    "stage/arena_floor", "effect/kick_arc", "effect/hit_spark_sheet",
+                    "stage/arena_floor", "stage/electric_tile_sheet", "effect/kick_arc", "effect/hit_spark_sheet",
                     "effect/enemy_break_sheet", "effect/wall_hit_sheet",
                     "ui/hp_full", "ui/hp_empty", "ui/kick_ready", "ui/kick_cooldown",
                     "ui/scrap_hud", "ui/scrap_result", "ui/title_logo" })
@@ -30,6 +32,8 @@ namespace ActionGame
                     foreach (string name in new[] { "kick_swing", "metal_hit", "wall_hit", "player_hurt",
                         "enemy_break", "clear", "game_over", "restart" })
                         sounds.Add(name, new G2Audio(ResourcePath("sound/sfx/" + name + ".wav")));
+                if (G2AudioContext.Instance?.Audio != null)
+                    music = new G2Audio(ResourcePath("sound/bgm/scrapyard_loop.wav"));
                 G2AudioContext.Instance?.MasteringVoice?.SetVolume(0.65f);
             }
             catch { Dispose(); throw; }
@@ -39,6 +43,23 @@ namespace ActionGame
             Path.Combine(AppContext.BaseDirectory, "resource", relative.Replace('/', Path.DirectorySeparatorChar));
 
         public void DrawFloor(Rect destination) => images["arena_floor"].Draw(destination, new Rect(0, 0, 840, 480));
+
+        // 1254×1254 원본을 627×627 네 칸으로 나눈다: 대기, 경고, 방전 A, 방전 B.
+        public void DrawElectricTile(Rect destination, int frame) => images["electric_tile_sheet"].Draw(
+            destination, new Rect((frame % 2) * 627, (frame / 2) * 627, 627, 627));
+
+        public void DrawElectricFloor(int round, float time)
+        {
+            if (round < 2) return;
+            float phase = time % GameRules.HazardCycle;
+            int frame;
+            if (phase < GameRules.HazardWarning) frame = 0;
+            else if (phase < GameRules.HazardStart) frame = 1;
+            else frame = 2 + (int)(time * 12) % 2; // 2, 3번 그림을 초당 12번 교대
+            if (round == 3)
+                for (int i = 0; i < 10; i++) DrawElectricTile(new Rect(30 + i * 84, 296, 84, 68), frame);
+            for (int i = 0; i < 6; i++) DrawElectricTile(new Rect(406, 90 + i * 80, 88, 80), frame);
+        }
 
         // 로컬 회전 뒤 기존 화면 배율을 곱해야 전체 화면에서도 중심이 맞는다.
         public void DrawSprite(string name, float x, float y, float size, float angle = 0, float opacity = 1)
@@ -54,6 +75,7 @@ namespace ActionGame
                 images[name].Draw(new Rect(-size / 2 + offsetX, -size / 2, size, size),
                     new Rect(0, 0, sourceSize, sourceSize), opacity);
             }
+            // 회전을 복구하지 않으면 다음 캐릭터와 UI까지 함께 돌아간다.
             finally { target.Transform = saved; }
         }
 
@@ -83,6 +105,7 @@ namespace ActionGame
                 images[sheet].Draw(new Rect(-size * anchorX, -size / 2, size, size),
                     new Rect(frame % 2 * 128, frame / 2 * 128, 128, 128), opacity);
             }
+            // 회전을 복구하지 않으면 다음 캐릭터와 UI까지 함께 돌아간다.
             finally { target.Transform = saved; }
         }
 
@@ -100,6 +123,13 @@ namespace ActionGame
             pendingSounds.Clear();
         }
 
+        public void UpdateMusic(bool enabled)
+        {
+            if (music == null) return;
+            if (enabled && !music.IsPlaying()) music.Play(true);
+            else if (!enabled && music.IsPlaying()) music.Stop();
+        }
+
         public void StopSounds()
         {
             pendingSounds.Clear();
@@ -109,6 +139,8 @@ namespace ActionGame
 
         public void Dispose()
         {
+            music?.Dispose();
+            music = null;
             foreach (G2Audio sound in sounds.Values) sound.Dispose();
             sounds.Clear();
             foreach (G2Texture image in images.Values) image.Dispose();

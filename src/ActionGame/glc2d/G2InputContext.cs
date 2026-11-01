@@ -142,7 +142,9 @@ class G2InputContext : IDisposable
 		var scaleX = G2AppBase.ScreenScaleX;
 		var scaleY = G2AppBase.ScreenScaleY;
 
-		_mousePosition = new PointF(point.X / scaleX, point.Y / scaleY);
+		// 가운데 정렬 여백을 먼저 빼야 화면과 게임의 마우스 좌표가 일치한다.
+		var viewport = G2AppBase.Instance!.Viewport;
+		_mousePosition = new PointF((point.X - viewport.X) / scaleX, (point.Y - viewport.Y) / scaleY);
 		_mouseDelta = new PointF(_mousePosition.X - _mouseOldPosition.X, _mousePosition.Y - _mouseOldPosition.Y);
 		_mouseOldPosition = _mousePosition;
 	}

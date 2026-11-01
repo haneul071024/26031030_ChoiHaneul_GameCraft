@@ -1,6 +1,5 @@
 using System.Numerics;
 using Vortice.Direct2D1;
-using Vortice.DirectWrite;
 using Vortice.Mathematics;
 
 namespace ActionGame
@@ -15,14 +14,27 @@ namespace ActionGame
         public override System.Drawing.Size ScreenSize => GameGlobal.ScreenSize;
         public override string GameName => GameGlobal.GameName;
 
-        // Direct2D 붓과 glc2d 글꼴은 초기화할 때 한 번 만들고 계속 재사용한다.
+        // Direct2D 붓은 초기화할 때 한 번 만들고 계속 재사용한다.
         // ?는 아직 생성되지 않은 상태(null)도 가능하다는 뜻이다.
         private ID2D1SolidColorBrush? brush;
-        private G2Font? uiFont;
-        private G2Font? titleFont;
         private RectangleF arena = new RectangleF(30, 90, 840, 480);
         private int score = 0;
-        private bool gameEnded = false;
+        // 숫자 대신 이름으로 상태를 구분하면 if 조건의 뜻을 바로 알 수 있다.
+        private enum GameState { Lobby, Playing, RoundClear, Result, Paused }
+        private GameState state = GameState.Lobby;
+        // 전투 중인지 여부로 걷기 애니메이션을 멈춘다.
+        private bool gameEnded => state != GameState.Playing;
+        private int round;
+        private const int RoundCount = GameRules.RoundCount;
+        private float roundTime;
+        private int roundBonus;
+        private int bestScore;
+        private bool musicEnabled = true;
+        private readonly HashSet<Enemy> shockedEnemies = new();
+        private float HazardPhase => roundTime % GameRules.HazardCycle; // 나머지: 0~6초 반복
+        private bool HazardActive => round >= 2 && HazardPhase >= GameRules.HazardStart;
+        private bool InHazard(float x, float y, float radius) =>
+            Math.Abs(x - 450) < 44 + radius || (round == 3 && Math.Abs(y - 330) < 34 + radius);
         private float kickEffectTime = 0;
         private float kickX;
         private float kickY;
@@ -34,6 +46,13 @@ namespace ActionGame
         private float playerWalkTime;
         private float enemyWalkTime;
         private bool playerMoving;
+        private float visualTime;
+        private float clearTime;
+        private bool wasHazardActive; // 이전 프레임에도 전기가 켜져 있었는지 기억한다.
+        private float readyTime;       // 라운드 시작 전 준비 시간
+        private int recoveredHp;       // 실제로 회복한 양 (체력이 가득 차 있으면 0)
+        private int healthBonus;
+        private readonly List<ScorePopup> scorePopups = new List<ScorePopup>();
 
         private void AddEffect(string sheet, float x, float y, float size, float duration, float angle = 0)
         {
@@ -43,8 +62,17 @@ namespace ActionGame
 
         private void UpdateEffects(float dt)
         {
-            foreach (GameEffect effect in effects) effect.Update(dt);
-            effects.RemoveAll(effect => effect.Finished);
+            // 뒤에서부터 검사하면 RemoveAt 뒤에도 다음 검사 대상이 밀리지 않는다.
+            for (int i = effects.Count - 1; i >= 0; i--)
+            {
+                effects[i].Update(dt);
+                if (effects[i].Finished) effects.RemoveAt(i);
+            }
+            for (int i = scorePopups.Count - 1; i >= 0; i--)
+            {
+                scorePopups[i].Update(dt);
+                if (scorePopups[i].Life <= 0) scorePopups.RemoveAt(i);
+            }
         }
 
         private void RemoveDefeatedEnemies()
@@ -54,8 +82,8 @@ namespace ActionGame
                 if (enemies[i].Hp > 0) continue;
                 AddEffect("enemy_break_sheet", enemies[i].X, enemies[i].Y, 88, 0.4f);
                 assets?.QueueSound("enemy_break");
+                AddScore(GameRules.DefeatScore, enemies[i].X, enemies[i].Y, "처치");
                 enemies.RemoveAt(i);
-                score += 100;
             }
         }
 
@@ -64,80 +92,182 @@ namespace ActionGame
             // Run이 시작될 때 한 번 호출된다. 이때는 그래픽 장치가 준비되어 있다.
             ClearColor = Rgb(17, 22, 18);
             brush = RenderTarget.CreateSolidColorBrush(Rgb(255, 255, 255));
-            uiFont = new G2Font("맑은 고딕", 17, FontWeight.Normal);
-            titleFont = new G2Font("맑은 고딕", 32, FontWeight.Bold);
             assets = new GameAssets();
             hud = new GameHud();
-            StartGame();
+            state = GameState.Lobby;
         }
 
+        // 새 도전에서는 전부 초기화한다. bestScore는 이번 실행 기록이므로 유지한다.
         private void StartGame()
         {
             assets?.StopSounds();
             player = new Player();
-            enemies.Clear();
             score = 0;
-            gameEnded = false;
-            kickEffectTime = 0;
-            effects.Clear();
-            playerWalkTime = enemyWalkTime = 0;
-            playerMoving = false;
+            round = 0;
+            StartRound();
+        }
 
-            // 일단 적 6마리를 고정 위치에 배치한다. 생성자를 통해 좌표를 전달한다.
-            enemies.Add(new Enemy(150, 180));
-            enemies.Add(new Enemy(230, 180));
-            enemies.Add(new Enemy(700, 180));
-            enemies.Add(new Enemy(150, 470));
-            enemies.Add(new Enemy(700, 470));
-            enemies.Add(new Enemy(780, 470));
+        // 다음 라운드에서는 체력과 누적 점수를 유지하고 전투 대상만 다시 만든다.
+        private void StartRound()
+        {
+            round++;
+            state = GameState.Playing;
+            roundTime = 0;
+            readyTime = GameRules.ReadyDuration;
+            recoveredHp = 0;
+            healthBonus = 0;
+            scorePopups.Clear();
+            clearTime = 0;
+            wasHazardActive = false;
+            roundBonus = 0;
+            player.X = 310;
+            player.Y = 320;
+            player.KickCooldown = player.InvincibleTime = 0;
+            player.DirectionX = 1;
+            player.DirectionY = 0;
+            enemies.Clear();
+            effects.Clear();
+            shockedEnemies.Clear();
+            kickEffectTime = playerWalkTime = enemyWalkTime = 0;
+            playerMoving = false;
+            int count = GameRules.EnemyCount(round);
+            for (int i = 0; i < count; i++)
+            {
+                // 원 한 바퀴(2π)를 적 수만큼 나눈다. X/Y 반지름이 달라서 타원이 된다.
+                float angle = MathF.Tau * i / count;
+                enemies.Add(new Enemy(450 + MathF.Cos(angle) * 330, 330 + MathF.Sin(angle) * 190));
+            }
         }
 
         protected override void Update()
         {
-            // glc2d가 매 프레임 입력을 먼저 읽고 이 함수를 호출한다.
-            // 창이 비활성 상태라면 게임을 잠시 멈추고 눌림 기록을 지운다.
             if (Form.ActiveForm == null)
             {
                 assets?.StopSounds();
+                assets?.UpdateMusic(false);
                 Input.Reset();
                 return;
             }
+            // 지연 후 큰 이동이 발생하지 않도록 한 번에 반영할 시간을 제한한다.
             float dt = Math.Min((float)DeltaTime, 0.05f);
-            UpdateEffects(dt); // 결과창 뒤에서도 마지막 파괴 효과가 끝까지 재생된다.
-            if (gameEnded)
+            if (Input.IsKeyDown(Keys.M)) musicEnabled = !musicEnabled;
+            if (Input.IsKeyDown(Keys.Escape))
             {
-                // Alt+Enter는 glc2d의 전체 화면 키이므로 재시작과 구분한다.
-                if (Input.IsKeyDown(Keys.Enter) && !IsHeld(Keys.Menu))
-                {
-                    StartGame();
-                    assets?.QueueSound("restart");
-                    assets?.FlushSounds(TotalTime);
-                }
+                if (state == GameState.Playing) state = GameState.Paused;
+                else if (state == GameState.Paused) state = GameState.Playing;
+                else state = GameState.Lobby;
+            }
+            // 일시정지 메뉴에서만 L로 로비로 간다. 전투 중 실수로 진행을 버리지 않게 한다.
+            if (state == GameState.Paused && Input.IsKeyDown(Keys.L)) state = GameState.Lobby;
+            if (state != GameState.Paused)
+            {
+                visualTime += dt;
+                UpdateEffects(dt);
+            }
+            if (state == GameState.RoundClear || (state == GameState.Result && player.Hp > 0)) clearTime += dt;
+            assets?.UpdateMusic(musicEnabled && state != GameState.Paused);
+            bool enter = Input.IsKeyDown(Keys.Enter) && !IsHeld(Keys.Menu);
+            if (state == GameState.Lobby || state == GameState.Result)
+            {
+                if (enter) { StartGame(); assets?.QueueSound("restart"); }
+                assets?.FlushSounds(TotalTime);
                 return;
             }
-            // 실제로 지난 시간을 이용하면 컴퓨터 속도에 따른 이동 차이가 줄어든다.
-            // 창을 오래 멈췄다가 돌아와도 갑자기 멀리 이동하지 않도록 최대값을 둔다.
-
-            if (!gameEnded)
+            if (state == GameState.Paused) return;
+            if (state == GameState.RoundClear)
             {
-                player.KickCooldown = Math.Max(0, player.KickCooldown - dt);
-                player.InvincibleTime = Math.Max(0, player.InvincibleTime - dt);
-                kickEffectTime = Math.Max(0, kickEffectTime - dt);
-                enemyWalkTime += dt;
-                MovePlayer(dt);
-                // IsKeyDown은 처음 누른 프레임만 true라서 꾹 눌러도 연타되지 않는다.
-                if (Input.IsKeyDown(Keys.J)) Kick();
-                MoveEnemies(dt);
-                CheckEnemyCollisions();
-
-                RemoveDefeatedEnemies();
-                gameEnded = player.Hp <= 0 || enemies.Count == 0;
-                if (gameEnded) assets?.QueueSound(player.Hp <= 0 ? "game_over" : "clear");
-                assets?.FlushSounds(TotalTime);
+                if (enter) StartRound();
+                return;
             }
-            // Invalidate나 Timer는 필요 없다. glc2d가 이어서 Render를 호출한다.
+            // 준비 중에는 입력 안내만 보여 주고 적, 플레이어, 점수용 시간은 멈춘다.
+            if (readyTime > 0)
+            {
+                readyTime = Math.Max(0, readyTime - dt);
+                return;
+            }
+            roundTime += dt;
+            player.KickCooldown = Math.Max(0, player.KickCooldown - dt);
+            player.InvincibleTime = Math.Max(0, player.InvincibleTime - dt);
+            kickEffectTime = Math.Max(0, kickEffectTime - dt);
+            enemyWalkTime += dt;
+            MovePlayer(dt);
+            if (Input.IsKeyDown(Keys.J)) Kick();
+            MoveEnemies(dt);
+            CheckEnemyCollisions();
+            UpdateHazard();
+            RemoveDefeatedEnemies();
+            CheckRoundEnd();
+            assets?.FlushSounds(TotalTime);
         }
 
+        // 플레이 중에만 판정한다. 완료 상태로 바뀌면 다음 프레임에 보상을 다시 주지 않는다.
+        private void CheckRoundEnd()
+        {
+            if (state != GameState.Playing) return;
+            // 같은 프레임에 마지막 적과 플레이어가 모두 쓰러지면 패배를 우선한다.
+            if (player.Hp <= 0)
+            {
+                state = GameState.Result;
+                assets?.QueueSound("game_over");
+            }
+            else if (enemies.Count == 0)
+            {
+                // 회복하기 전 체력으로 보너스를 계산해야 보상이 부풀려지지 않는다.
+                healthBonus = player.Hp * 50;
+                roundBonus = 300 + GameRules.TimeBonus(roundTime) + healthBonus;
+                score += roundBonus;
+                if (round == RoundCount)
+                {
+                    state = GameState.Result;
+                }
+                else
+                {
+                    state = GameState.RoundClear;
+                    int previousHp = player.Hp;
+                    player.Hp = Math.Min(GameRules.MaxHp, player.Hp + 1);
+                    recoveredHp = player.Hp - previousHp;
+                }
+                assets?.QueueSound("clear");
+            }
+            bestScore = Math.Max(bestScore, score);
+        }
+
+        // 전기 그림은 GameAssets, 실제 피해 계산은 여기서 담당한다.
+        private void UpdateHazard()
+        {
+            if (!HazardActive)
+            {
+                // 새 작동 주기에 다시 피해를 줄 수 있도록 명단을 비운다.
+                shockedEnemies.Clear();
+                wasHazardActive = false;
+                return;
+            }
+            if (!wasHazardActive)
+            {
+                wasHazardActive = true;
+                assets?.QueueSound("wall_hit");
+                for (int i = 0; i < 6; i++) AddEffect("hit_spark_sheet", 450, 130 + i * 80, 100, 0.35f);
+                if (round == 3)
+                    for (int i = 0; i < 10; i++) AddEffect("hit_spark_sheet", 72 + i * 84, 330, 80, 0.35f);
+            }
+            if (InHazard(player.X, player.Y, player.Radius) && player.InvincibleTime <= 0 && player.Hp > 0)
+            {
+                player.Hp--;
+                player.InvincibleTime = 1;
+                assets?.QueueSound("player_hurt");
+                AddEffect("hit_spark_sheet", player.X, player.Y, 60, 0.2f);
+            }
+            foreach (Enemy enemy in enemies)
+            {
+                if (enemy.Hp <= 0) continue;
+                if (!InHazard(enemy.X, enemy.Y, enemy.Radius)) continue;
+                if (shockedEnemies.Contains(enemy)) continue;
+                shockedEnemies.Add(enemy); // 이번 작동에서 이미 피해를 받은 적을 기록한다.
+                enemy.Hp--;
+                AddEffect("hit_spark_sheet", enemy.X, enemy.Y, 60, 0.2f);
+                assets?.QueueSound("metal_hit");
+            }
+        }
         private bool IsHeld(Keys key)
         {
             // Down은 누른 순간, Press는 계속 누르고 있는 상태이다.
@@ -151,10 +281,10 @@ namespace ActionGame
             float previousY = player.Y;
             float dx = 0;
             float dy = 0;
-            if (IsHeld(Keys.W)) dy -= 1;
-            if (IsHeld(Keys.S)) dy += 1;
-            if (IsHeld(Keys.A)) dx -= 1;
-            if (IsHeld(Keys.D)) dx += 1;
+            if (IsHeld(Keys.W) || IsHeld(Keys.Up)) dy -= 1;
+            if (IsHeld(Keys.S) || IsHeld(Keys.Down)) dy += 1;
+            if (IsHeld(Keys.A) || IsHeld(Keys.Left)) dx -= 1;
+            if (IsHeld(Keys.D) || IsHeld(Keys.Right)) dx += 1;
 
             float length = MathF.Sqrt(dx * dx + dy * dy);
             if (length > 0)
@@ -176,8 +306,9 @@ namespace ActionGame
         private void Kick()
         {
             if (player.KickCooldown > 0) return;
-            player.KickCooldown = 0.4f;
+            player.KickCooldown = GameRules.KickCooldown;
             kickEffectTime = 0.12f;
+            // 방향 벡터 (dx, dy)를 이미지 회전에 필요한 각도(라디안)로 바꾼다.
             kickAngle = MathF.Atan2(player.DirectionY, player.DirectionX);
             assets?.QueueSound("kick_swing");
             kickX = player.X + player.DirectionX * 42;
@@ -197,11 +328,12 @@ namespace ActionGame
             }
         }
 
+        // 좌표를 즉시 옮기지 않고 속도를 저장한다. 실제 이동은 MoveEnemies에서 한다.
         private void LaunchEnemy(Enemy enemy, float dx, float dy)
         {
-            enemy.VelocityX = dx * 600;
-            enemy.VelocityY = dy * 600;
-            enemy.FlyTime = 0.65f;
+            enemy.VelocityX = dx * GameRules.LaunchSpeed;
+            enemy.VelocityY = dy * GameRules.LaunchSpeed;
+            enemy.FlyTime = GameRules.FlyDuration;
             enemy.HitEnemies.Clear();
         }
 
@@ -216,6 +348,7 @@ namespace ActionGame
                     enemy.X += enemy.VelocityX * dt;
                     enemy.Y += enemy.VelocityY * dt;
                     // 시간이 지날수록 속도가 줄어드는 간단한 마찰 표현이다.
+                    // Exp는 지수 함수다. 0~1 사이의 감속 비율을 곱해 프레임 속도 차이를 줄인다.
                     enemy.VelocityX *= MathF.Exp(-2 * dt);
                     enemy.VelocityY *= MathF.Exp(-2 * dt);
 
@@ -242,8 +375,8 @@ namespace ActionGame
                     float distance = Distance(player.X, player.Y, enemy.X, enemy.Y);
                     if (distance > 0)
                     {
-                        enemy.X += dx / distance * 65 * dt;
-                        enemy.Y += dy / distance * 65 * dt;
+                        enemy.X += dx / distance * (55 + round * 10) * dt;
+                        enemy.Y += dy / distance * (55 + round * 10) * dt;
                     }
                     if (Distance(player.X, player.Y, enemy.X, enemy.Y) < player.Radius + enemy.Radius &&
                         player.InvincibleTime <= 0 && player.Hp > 0)
@@ -259,6 +392,7 @@ namespace ActionGame
             }
         }
 
+        // 중첩 반복문: 날아가는 적 하나를 다른 모든 적과 비교한다.
         private void CheckEnemyCollisions()
         {
             foreach (Enemy flying in enemies)
@@ -271,7 +405,7 @@ namespace ActionGame
                     {
                         flying.HitEnemies.Add(target);
                         AddEffect("hit_spark_sheet", target.X, target.Y, 66, 0.20f);
-                    assets?.QueueSound("metal_hit");
+                        assets?.QueueSound("metal_hit");
                         target.Hp -= 1;
                         // 맞은 적도 같은 방향으로 날아가서 연쇄 충돌을 만들 수 있다.
                         float speed = MathF.Sqrt(flying.VelocityX * flying.VelocityX + flying.VelocityY * flying.VelocityY);
@@ -280,12 +414,19 @@ namespace ActionGame
                             LaunchEnemy(target, flying.VelocityX / speed, flying.VelocityY / speed);
                             target.HitEnemies.Add(flying); // 방금 부딪힌 적을 즉시 다시 때리지 않는다.
                         }
-                        score += 50;
+                        AddScore(GameRules.ChainScore, target.X, target.Y - 25, "연쇄");
                     }
                 }
             }
         }
 
+        private void AddScore(int points, float x, float y, string reason)
+        {
+            score += points;
+            // 표시용 목록이 무한히 커지지 않도록 오래된 글자부터 지운다.
+            if (scorePopups.Count >= 24) scorePopups.RemoveAt(0);
+            scorePopups.Add(new ScorePopup(x, y, points, reason));
+        }
         private float Distance(float x1, float y1, float x2, float y2)
         {
             float dx = x2 - x1;
@@ -298,12 +439,20 @@ namespace ActionGame
             // glc2d가 BeginDraw, 배경 지우기, EndDraw를 처리한다.
             // 여기서는 이번 화면에 보일 도형과 글자만 그린다.
             // RenderTarget은 glc2d가 제공하는 Direct2D 그리기 대상이다.
-            if (brush == null || uiFont == null || titleFont == null) return;
+            if (brush == null || assets == null || hud == null) return;
 
-            assets?.DrawFloor(new Rect(arena.X, arena.Y, arena.Width, arena.Height));
+            assets.DrawFloor(new Rect(arena.X, arena.Y, arena.Width, arena.Height));
             brush.Color = Rgb(112, 119, 99);
             RenderTarget.DrawRectangle(new Rect(arena.X, arena.Y, arena.Width, arena.Height), brush);
-            if (assets != null) hud?.DrawStatus(assets, player, score, enemies.Count);
+            if (state == GameState.Lobby)
+            {
+                hud.DrawLobby(assets, bestScore, musicEnabled, visualTime);
+                return;
+            }
+            assets.DrawElectricFloor(round, roundTime);
+            DrawElectricArcs();
+            hud.DrawStatus(assets, player, score, enemies.Count);
+            hud.DrawRound(round, roundTime, enemies.Count, musicEnabled);
 
             foreach (Enemy enemy in enemies)
             {
@@ -311,53 +460,88 @@ namespace ActionGame
                 float angle = flying
                     ? MathF.Atan2(enemy.VelocityY, enemy.VelocityX)
                     : MathF.Atan2(player.Y - enemy.Y, player.X - enemy.X);
-                if (flying) assets?.DrawSprite("enemy_flying", enemy.X, enemy.Y, 48, angle);
+                if (flying) assets.DrawSprite("enemy_flying", enemy.X, enemy.Y, 48, angle);
                 else if (!gameEnded && Distance(player.X, player.Y, enemy.X, enemy.Y) > 1)
-                    assets?.DrawFrame("enemy_walk_sheet", (int)(enemyWalkTime * 7) % 4, enemy.X, enemy.Y, 48, angle);
-                else assets?.DrawSprite("enemy_basic", enemy.X, enemy.Y, 48, angle);
-                hud?.DrawEnemyHealth(enemy.X, enemy.Y, enemy.Hp, flying);
+                    assets.DrawFrame("enemy_walk_sheet", (int)(enemyWalkTime * 7) % 4, enemy.X, enemy.Y, 48, angle);
+                else assets.DrawSprite("enemy_basic", enemy.X, enemy.Y, 48, angle);
+                hud.DrawEnemyHealth(enemy.X, enemy.Y, enemy.Hp, flying);
             }
 
             float playerAngle = kickEffectTime > 0 ? kickAngle : MathF.Atan2(player.DirectionY, player.DirectionX);
             float opacity = player.InvincibleTime > 0 && (int)(player.InvincibleTime * 12) % 2 == 0 ? 0.35f : 1;
             if (kickEffectTime > 0)
-                assets?.DrawSprite("player_kick", player.X, player.Y, 50, playerAngle, opacity);
+                assets.DrawSprite("player_kick", player.X, player.Y, 50, playerAngle, opacity);
             else if (playerMoving && !gameEnded)
-                assets?.DrawFrame("player_walk_sheet", (int)(playerWalkTime * 9) % 4, player.X, player.Y, 50, playerAngle, opacity);
-            else assets?.DrawSprite("player_idle", player.X, player.Y, 50, playerAngle, opacity);
-            brush.Color = Rgb(255, 255, 255);
-            RenderTarget.DrawLine(new Vector2(player.X, player.Y),
-                new Vector2(player.X + MathF.Cos(playerAngle) * 28, player.Y + MathF.Sin(playerAngle) * 28), brush, 2);
+                assets.DrawFrame("player_walk_sheet", (int)(playerWalkTime * 9) % 4, player.X, player.Y, 50, playerAngle, opacity);
+            else assets.DrawSprite("player_idle", player.X, player.Y, 50, playerAngle, opacity);
             if (kickEffectTime > 0)
-                assets?.DrawSprite("kick_arc", kickX, kickY, 96, kickAngle, 0.9f);
+                assets.DrawSprite("kick_arc", kickX, kickY, 96, kickAngle, 0.9f);
 
             foreach (GameEffect effect in effects)
-                assets?.DrawFrame(effect.Sheet, effect.Frame, effect.X, effect.Y, effect.Size, effect.Angle);
+                assets.DrawFrame(effect.Sheet, effect.Frame, effect.X, effect.Y, effect.Size, effect.Angle);
 
-            if (gameEnded && assets != null)
-                hud?.DrawResult(assets, player.Hp <= 0, score, player.Hp);
+            foreach (ScorePopup popup in scorePopups) hud.DrawScorePopup(popup);
+            if (state == GameState.Playing && readyTime > 0) hud.DrawReady(round, readyTime);
+            if (state == GameState.RoundClear)
+                hud.DrawRoundClear(assets, round, roundBonus, score, visualTime, recoveredHp, GameRules.TimeBonus(roundTime), healthBonus);
+            if (state == GameState.Paused) hud.DrawPause(assets, musicEnabled);
+            if (state == GameState.Result)
+                hud.DrawResult(assets, player.Hp <= 0, score, player.Hp, round, bestScore);
+            if (state == GameState.RoundClear || (state == GameState.Result && player.Hp > 0)) DrawCelebration();
+        }
+        private void DrawElectricArcs()
+        {
+            if (brush == null || round < 2) return;
+            if (!HazardActive)
+            {
+                if (HazardPhase >= 2.5f)
+                {
+                    brush.Color = new Color4(1, 0.7f, 0.1f, 0.45f + 0.4f * MathF.Sin(roundTime * 20));
+                    RenderTarget.DrawRectangle(new Rect(406, 90, 88, 480), brush, 3);
+                    if (round == 3) RenderTarget.DrawRectangle(new Rect(30, 296, 840, 68), brush, 3);
+                }
+                return;
+            }
+            // 시간을 정수로 나누어 번개 모양을 초당 20번만 바꾼다.
+            int tick = (int)(roundTime * 20);
+            brush.Color = new Color4(0.65f, 0.96f, 1, 0.9f);
+            for (int i = 0; i < 18; i++)
+            {
+                float y = 100 + i * 26;
+                float x = 450 + MathF.Sin(i * 8 + tick) * 28;
+                float nextX = 450 + MathF.Sin((i + 1) * 8 + tick) * 28;
+                RenderTarget.DrawLine(new Vector2(x, y), new Vector2(nextX, y + 26), brush, 2);
+                if (round == 3)
+                {
+                    float hx = 40 + i * 45;
+                    float hy = 330 + MathF.Sin(i * 6 + tick) * 23;
+                    RenderTarget.DrawLine(new Vector2(hx, hy), new Vector2(hx + 42, 330 + MathF.Sin((i + 1) * 6 + tick) * 23), brush, 2);
+                }
+            }
+        }
+
+        private void DrawCelebration()
+        {
+            // 원 방향으로 퍼지는 점에 아래쪽 가속도를 더해 불꽃처럼 보이게 한다. 피해 판정은 없다.
+            if (clearTime > 2.6f) return;
+            for (int i = 0; i < 36; i++)
+            {
+                float t = Math.Max(0, clearTime - i % 4 * 0.1f);
+                float angle = i * 2.39996f;
+                float speed = 90 + i % 7 * 24;
+                float x = 450 + MathF.Cos(angle) * t * speed;
+                float y = 250 + MathF.Sin(angle) * t * speed + 65 * t * t;
+                FillCircle(x, y, 2 + i % 3, new Color4(1, 0.7f + i % 3 * 0.1f, 0.2f, Math.Max(0, 1 - t / 2.6f)));
+            }
         }
         // 아래 함수들은 자주 쓰는 그리기 코드를 짧게 묶은 것이다.
         // Rect의 인수는 왼쪽, 위쪽, 가로 길이, 세로 길이이다.
-        private void FillBox(float x, float y, float width, float height, Color4 color)
-        {
-            if (brush == null) return;
-            brush.Color = color;
-            RenderTarget.FillRectangle(new Rect(x, y, width, height), brush);
-        }
-
         private void FillCircle(float x, float y, float radius, Color4 color)
         {
             if (brush == null) return;
             brush.Color = color;
             // Direct2D의 Ellipse는 중심 좌표와 가로/세로 반지름을 받는다.
             RenderTarget.FillEllipse(new Ellipse(new Vector2(x, y), radius, radius), brush);
-        }
-
-        private void DrawLabel(string text, float x, float y)
-        {
-            // G2Font가 DirectWrite를 이용해 한글 문자열을 그린다.
-            uiFont?.DrawText(text, new Rect(x, y, 850, 30), Rgb(255, 255, 255));
         }
 
         private static Color4 Rgb(int red, int green, int blue)
@@ -374,11 +558,7 @@ namespace ActionGame
             hud = null;
             assets?.Dispose();
             assets = null;
-            uiFont?.Dispose();
-            titleFont?.Dispose();
             brush?.Dispose();
-            uiFont = null;
-            titleFont = null;
             brush = null;
             base.Dispose();
         }
