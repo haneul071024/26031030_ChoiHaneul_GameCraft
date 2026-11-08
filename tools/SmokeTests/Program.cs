@@ -134,6 +134,29 @@ class Program
             Game.GetMethod("MoveEnemies", Flags)!.Invoke(game, new object[] { 0.01f });
             Game.GetMethod("MoveEnemies", Flags)!.Invoke(game, new object[] { 0.01f });
             Check(Player.Hp == 4 && Player.InvincibleTime > 0, "enemy contact respects player invulnerability");
+            Check(Player.X < 310 && Player.X >= 48, "contact knockback creates space and stays inside arena");
+            Check((string)Get("damageReason") == "적 접촉" && (float)Get("hurtFlash") > 0,
+                "contact damage records its cause and visual feedback");
+            Call("StartGame");
+            var addScore = Game.GetMethod("AddScore", Flags)!;
+            for (int i = 0; i < 6; i++) addScore.Invoke(game, new object[] { 100, 300f, 300f, "처치" });
+            var popups = (IList)Get("scorePopups");
+            bool separated = true;
+            for (int i = 0; i < popups.Count; i++)
+                for (int j = i + 1; j < popups.Count; j++)
+                {
+                    var pt = popups[i]!.GetType();
+                    float ax = (float)pt.GetField("X")!.GetValue(popups[i])!;
+                    float ay = (float)pt.GetField("Y")!.GetValue(popups[i])!;
+                    float bx = (float)pt.GetField("X")!.GetValue(popups[j])!;
+                    float by = (float)pt.GetField("Y")!.GetValue(popups[j])!;
+                    separated &= Math.Abs(ax - bx) >= 150 || Math.Abs(ay - by) >= 28;
+                }
+            Check(separated && (int)Get("score") == 600, "simultaneous score popups separate without changing rewards");
+            Call("StartGame");
+            Check((int)Get("defeatedCount") == 0 && (int)Get("chainCount") == 0 &&
+                (float)Get("playTime") == 0 && (float)Get("hurtFlash") == 0,
+                "new run resets combat summary and damage feedback");
         }
         finally { ((IDisposable)game).Dispose(); }
     }

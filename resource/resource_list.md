@@ -14,7 +14,9 @@
 
 걷기와 충돌·파괴 시트는 256×256이며 128×128 프레임 4개를 2×2로 배치했다. 프레임 순서는 좌상→우상→좌하→우하이다.
 
-사용하지 않는 이전 result_panel과 status_icons 합본은 제거했다. 모든 현재 PNG/WAV는 코드에서 사용한다. 배경음악은 sound/bgm/scrapyard_loop.wav (16초, 44.1kHz, 모노 PCM16)이다.
+모든 현재 PNG/WAV는 GameAssets.cs의 로딩 목록에 포함된다. 배경음악은 sound/bgm/scrapyard_loop.wav (16초, 44.1kHz, 모노 PCM16)이다.
+
+4차 제출 리소스 구성은 PNG 19개와 WAV 9개, 총 28개이다. 이미지에는 배경·캐릭터·애니메이션·UI, 소리에는 효과음 8개와 BGM 1개가 포함된다. ActionGame.csproj는 resource 아래의 문서(.md)를 제외한 파일을 빌드·배포 폴더에 자동 복사한다. 파일을 추가하거나 교체할 때는 이 목록과 GameAssets.cs의 경로를 함께 맞춘다.
 
 제목은 참고 로고 느낌으로 새로 그린 title_logo.png를 사용한다. 결과 제목은 맑은 고딕, 안내와 숫자는 맑은 고딕이며, 폰트 파일은 포함하지 않는다.
 

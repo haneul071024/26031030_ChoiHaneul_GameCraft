@@ -85,7 +85,8 @@ namespace ActionGame
                 Box(x - 13 + i * 14, y - 30, 12, 2, i < hp ? (flying ? Gold : Red) : C(60, 68, 80));
         }
 
-        public void DrawResult(GameAssets assets, bool lost, int score, int hp, int round, int bestScore)
+        public void DrawResult(GameAssets assets, bool lost, int score, int hp, int round, int bestScore,
+            int defeated, int chains, float playTime, string damageReason)
         {
             Box(0, 0, 900, 620, C(4, 10, 18, 0.82f));
             assets.DrawPanel(new Rect(135, 65, 630, 495));
@@ -96,9 +97,11 @@ namespace ActionGame
             Text(centered, "최종 점수", 300, 252, 300, 23, Muted);
             Text(resultNumber, score.ToString("N0"), 230, 278, 440, 60, accent);
             Text(centered, $"도달 구역  {round} / 3     ·     남은 에너지  {hp} / {GameRules.MaxHp}", 190, 350, 520, 26, White);
-            Text(centered, $"이번 실행 최고 기록  {bestScore:N0}", 190, 387, 520, 25, Muted);
-            KeyHint("Enter", "다시 도전", 290, 445, 54);
-            KeyHint("Esc", "로비", 510, 445, 42);
+            Text(centered, $"처치 {defeated}대  ·  연쇄 {chains}회  ·  전투 {(int)playTime / 60:00}:{(int)playTime % 60:00}", 190, 381, 520, 25, Gold);
+            Text(body, $"이번 실행 최고 {bestScore:N0}", 220, 417, 240, 24, Muted);
+            Text(body, lost ? $"마지막 피해 · {damageReason}" : "모든 구역 정리 완료!", 480, 417, 240, 24, lost ? Red : Cyan);
+            KeyHint("Enter", "다시 도전", 290, 459, 54);
+            KeyHint("Esc", "로비", 510, 459, 42);
         }
         // 로비 미리보기는 실제 리소스만 재사용하며 전투 규칙은 실행하지 않는다.
         private void DrawStagePreview(GameAssets assets, int stage, float x, float y, float time)
@@ -210,7 +213,10 @@ namespace ActionGame
             Box(0, 235, 900, 150, C(4, 10, 18, 0.9f));
             Text(centered, $"구역 {round:00} / 03", 100, 249, 700, 26, Gold);
             Text(resultTitle, GameRules.RoundName(round), 100, 282, 700, 50, White);
-            Text(centered, "작전 준비", 100, 338, 700, 27, Muted);
+            string tip = round == 1 ? "벽에 밀어붙이고, 적끼리 부딪히게 하세요" :
+                round == 2 ? "노란 예고 뒤 전류 방출! 적을 전기 바닥으로 유도하세요" :
+                "십자 전기 주의! 네 모서리의 안전 공간을 활용하세요";
+            Text(centered, tip, 100, 338, 700, 27, Muted);
             Box(300, 375, 300 * (1 - remaining / GameRules.ReadyDuration), 3, Gold);
         }
 
@@ -218,7 +224,18 @@ namespace ActionGame
         {
             // 남은 시간을 투명도로 쓰면 점수가 천천히 사라진다.
             float opacity = Math.Clamp(popup.Life / 0.4f, 0, 1);
+            Box(popup.X - 72, popup.Y - 36, 144, 24, C(7, 15, 19, opacity * 0.85f));
             Text(centered, popup.Text, popup.X - 85, popup.Y - 38, 170, 26, C(255, 216, 110, opacity));
+        }
+
+        public void DrawDamageFeedback(float remaining, string reason)
+        {
+            if (remaining <= 0) return;
+            float alpha = Math.Clamp(remaining / 0.3f, 0, 1);
+            Color4 tint = C(255, 70, 60, alpha * 0.6f);
+            Box(30, 90, 840, 5, tint); Box(30, 565, 840, 5, tint);
+            Box(30, 90, 5, 480, tint); Box(865, 90, 5, 480, tint);
+            Text(centered, reason + "  -1", 310, 535, 280, 26, C(255, 155, 130, alpha));
         }
 
         private void KeyHint(string key, string action, float x, float y, float keyWidth)

@@ -53,6 +53,11 @@ namespace ActionGame
         private int recoveredHp;       // 실제로 회복한 양 (체력이 가득 차 있으면 0)
         private int healthBonus;
         private readonly List<ScorePopup> scorePopups = new List<ScorePopup>();
+        private float playTime;        // 준비·정비·일시정지를 제외한 이번 도전 시간
+        private int defeatedCount;
+        private int chainCount;
+        private float hurtFlash;       // 피격 직후 테두리를 잠깐 붉게 표시한다.
+        private string damageReason = "";
 
         private void AddEffect(string sheet, float x, float y, float size, float duration, float angle = 0)
         {
@@ -83,6 +88,7 @@ namespace ActionGame
                 AddEffect("enemy_break_sheet", enemies[i].X, enemies[i].Y, 88, 0.4f);
                 assets?.QueueSound("enemy_break");
                 AddScore(GameRules.DefeatScore, enemies[i].X, enemies[i].Y, "처치");
+                defeatedCount++;
                 enemies.RemoveAt(i);
             }
         }
@@ -103,6 +109,9 @@ namespace ActionGame
             assets?.StopSounds();
             player = new Player();
             score = 0;
+            playTime = 0;
+            defeatedCount = chainCount = 0;
+            damageReason = "";
             round = 0;
             StartRound();
         }
@@ -120,6 +129,7 @@ namespace ActionGame
             clearTime = 0;
             wasHazardActive = false;
             roundBonus = 0;
+            hurtFlash = 0;
             player.X = 310;
             player.Y = 320;
             player.KickCooldown = player.InvincibleTime = 0;
@@ -163,6 +173,7 @@ namespace ActionGame
             {
                 visualTime += dt;
                 UpdateEffects(dt);
+                hurtFlash = Math.Max(0, hurtFlash - dt);
             }
             if (state == GameState.RoundClear || (state == GameState.Result && player.Hp > 0)) clearTime += dt;
             assets?.UpdateMusic(musicEnabled && state != GameState.Paused);
@@ -186,6 +197,7 @@ namespace ActionGame
                 return;
             }
             roundTime += dt;
+            playTime += dt;
             player.KickCooldown = Math.Max(0, player.KickCooldown - dt);
             player.InvincibleTime = Math.Max(0, player.InvincibleTime - dt);
             kickEffectTime = Math.Max(0, kickEffectTime - dt);
@@ -252,10 +264,7 @@ namespace ActionGame
             }
             if (InHazard(player.X, player.Y, player.Radius) && player.InvincibleTime <= 0 && player.Hp > 0)
             {
-                player.Hp--;
-                player.InvincibleTime = 1;
-                assets?.QueueSound("player_hurt");
-                AddEffect("hit_spark_sheet", player.X, player.Y, 60, 0.2f);
+                HurtPlayer("전기 바닥", player.X, player.Y);
             }
             foreach (Enemy enemy in enemies)
             {
@@ -273,6 +282,30 @@ namespace ActionGame
             // Down은 누른 순간, Press는 계속 누르고 있는 상태이다.
             // 이동은 두 상태를 모두 확인해야 첫 프레임부터 부드럽게 움직인다.
             return Input.IsKeyDown(key) || Input.IsKeyPress(key);
+        }
+
+        private void HurtPlayer(string reason, float sourceX, float sourceY)
+        {
+            if (player.InvincibleTime > 0 || player.Hp <= 0) return;
+            player.Hp--;
+            player.InvincibleTime = 1;
+            hurtFlash = 0.3f;
+            damageReason = reason;
+            assets?.QueueSound("player_hurt");
+            AddEffect("hit_spark_sheet", player.X, player.Y, 60, 0.2f);
+            // 접촉한 적의 반대쪽으로 조금 밀어 탈출할 공간을 만든다.
+            // 전기 피해는 출발점이 같으므로 위치를 바꾸지 않는다.
+            float dx = player.X - sourceX, dy = player.Y - sourceY;
+            float length = MathF.Sqrt(dx * dx + dy * dy);
+            if (reason == "적 접촉" && length < 0.001f)
+            {
+                dx = -player.DirectionX; dy = -player.DirectionY; length = 1;
+            }
+            if (length > 0.001f)
+            {
+                player.X = Math.Clamp(player.X + dx / length * 32, arena.Left + player.Radius, arena.Right - player.Radius);
+                player.Y = Math.Clamp(player.Y + dy / length * 32, arena.Top + player.Radius, arena.Bottom - player.Radius);
+            }
         }
 
         private void MovePlayer(float dt)
@@ -381,10 +414,7 @@ namespace ActionGame
                     if (Distance(player.X, player.Y, enemy.X, enemy.Y) < player.Radius + enemy.Radius &&
                         player.InvincibleTime <= 0 && player.Hp > 0)
                     {
-                        AddEffect("hit_spark_sheet", player.X, player.Y, 52, 0.20f);
-                        assets?.QueueSound("player_hurt");
-                        player.Hp -= 1;
-                        player.InvincibleTime = 1; // 1초 동안 추가 피격을 막는다.
+                        HurtPlayer("적 접촉", enemy.X, enemy.Y);
                     }
                 }
                 enemy.X = Math.Clamp(enemy.X, arena.Left + enemy.Radius, arena.Right - enemy.Radius);
@@ -415,6 +445,7 @@ namespace ActionGame
                             target.HitEnemies.Add(flying); // 방금 부딪힌 적을 즉시 다시 때리지 않는다.
                         }
                         AddScore(GameRules.ChainScore, target.X, target.Y - 25, "연쇄");
+                        chainCount++;
                     }
                 }
             }
@@ -425,6 +456,16 @@ namespace ActionGame
             score += points;
             // 표시용 목록이 무한히 커지지 않도록 오래된 글자부터 지운다.
             if (scorePopups.Count >= 24) scorePopups.RemoveAt(0);
+            // 가까운 글자는 세로 간격을 벌린다. 실제 점수나 적 좌표는 바꾸지 않는다.
+            x = Math.Clamp(x, 120, 780);
+            y = Math.Clamp(y, 190, 550);
+            for (int attempt = 0; attempt < 24; attempt++)
+            {
+                bool overlaps = scorePopups.Any(p => Math.Abs(p.X - x) < 150 && Math.Abs(p.Y - y) < 28);
+                if (!overlaps) break;
+                y -= 28;
+                if (y < 180) { y = 530; x = x < 450 ? x + 170 : x - 170; }
+            }
             scorePopups.Add(new ScorePopup(x, y, points, reason));
         }
         private float Distance(float x1, float y1, float x2, float y2)
@@ -460,6 +501,14 @@ namespace ActionGame
                 float angle = flying
                     ? MathF.Atan2(enemy.VelocityY, enemy.VelocityX)
                     : MathF.Atan2(player.Y - enemy.Y, player.X - enemy.X);
+                DrawShadow(enemy.X, enemy.Y, 17);
+                if (flying)
+                {
+                    // 속도의 반대 방향으로 짧은 잔상을 그린다. 추가 충돌 판정은 없다.
+                    for (int i = 3; i >= 1; i--)
+                        assets.DrawSprite("enemy_flying", enemy.X - MathF.Cos(angle) * i * 12,
+                            enemy.Y - MathF.Sin(angle) * i * 12, 48, angle, 0.08f * (4 - i));
+                }
                 if (flying) assets.DrawSprite("enemy_flying", enemy.X, enemy.Y, 48, angle);
                 else if (!gameEnded && Distance(player.X, player.Y, enemy.X, enemy.Y) > 1)
                     assets.DrawFrame("enemy_walk_sheet", (int)(enemyWalkTime * 7) % 4, enemy.X, enemy.Y, 48, angle);
@@ -468,6 +517,8 @@ namespace ActionGame
             }
 
             float playerAngle = kickEffectTime > 0 ? kickAngle : MathF.Atan2(player.DirectionY, player.DirectionX);
+            DrawShadow(player.X, player.Y, 19);
+            DrawPlayerDirection(playerAngle);
             float opacity = player.InvincibleTime > 0 && (int)(player.InvincibleTime * 12) % 2 == 0 ? 0.35f : 1;
             if (kickEffectTime > 0)
                 assets.DrawSprite("player_kick", player.X, player.Y, 50, playerAngle, opacity);
@@ -481,13 +532,32 @@ namespace ActionGame
                 assets.DrawFrame(effect.Sheet, effect.Frame, effect.X, effect.Y, effect.Size, effect.Angle);
 
             foreach (ScorePopup popup in scorePopups) hud.DrawScorePopup(popup);
+            hud.DrawDamageFeedback(hurtFlash, damageReason);
             if (state == GameState.Playing && readyTime > 0) hud.DrawReady(round, readyTime);
             if (state == GameState.RoundClear)
                 hud.DrawRoundClear(assets, round, roundBonus, score, visualTime, recoveredHp, GameRules.TimeBonus(roundTime), healthBonus);
             if (state == GameState.Paused) hud.DrawPause(assets, musicEnabled);
             if (state == GameState.Result)
-                hud.DrawResult(assets, player.Hp <= 0, score, player.Hp, round, bestScore);
+                hud.DrawResult(assets, player.Hp <= 0, score, player.Hp, round, bestScore,
+                    defeatedCount, chainCount, playTime, damageReason);
             if (state == GameState.RoundClear || (state == GameState.Result && player.Hp > 0)) DrawCelebration();
+        }
+        private void DrawShadow(float x, float y, float radius)
+        {
+            if (brush == null) return;
+            brush.Color = new Color4(0, 0, 0, 0.3f);
+            RenderTarget.FillEllipse(new Ellipse(new Vector2(x, y + 17), radius, 7), brush);
+        }
+
+        private void DrawPlayerDirection(float angle)
+        {
+            if (brush == null) return;
+            brush.Color = player.KickCooldown <= 0 ? new Color4(1, 0.8f, 0.3f, 0.9f) : new Color4(0.6f, 0.7f, 0.7f, 0.5f);
+            Vector2 direction = new(MathF.Cos(angle), MathF.Sin(angle));
+            Vector2 side = new(-direction.Y, direction.X);
+            Vector2 tip = new Vector2(player.X, player.Y) + direction * 37;
+            RenderTarget.DrawLine(tip - direction * 8 + side * 6, tip, brush, 2);
+            RenderTarget.DrawLine(tip - direction * 8 - side * 6, tip, brush, 2);
         }
         private void DrawElectricArcs()
         {
